@@ -312,8 +312,24 @@ GPSI is disabled by default. If you see quota errors, ensure `--plugins.remove @
 Reports are stored in `/srv/docker/n8n/local_files/sitespeed-reports/{scanId}/`
 Check permissions: `ls -la /srv/docker/n8n/local_files/sitespeed-reports/`
 
+## Performance Scores vs Browser Lighthouse
+
+**Getting lower scores than your browser?** This is normal! See `PERFORMANCE_SCORES.md` for a detailed explanation.
+
+**Quick Fix**: The service now defaults to realistic performance testing (no CPU throttling) which gives you scores similar to running Lighthouse in your browser. The old default (4x CPU throttling) made sites appear much slower.
+
+```bash
+# Test your site with realistic settings (new default)
+curl -X POST http://localhost:5679/run-sitespeed \
+  -d '{"url": "https://example.com", "options": ["-b", "chrome", "-n", "3"]}'
+
+# Test different modes
+./test_performance_modes.sh https://example.com
+```
+
 ## Additional Resources
 
+- **Performance Scores**: See `PERFORMANCE_SCORES.md` for understanding and optimizing scores
 - **Lighthouse Integration**: See `LIGHTHOUSE_INTEGRATION.md` for detailed Lighthouse documentation
 - **Usage Examples**: See `USAGE.md` for more examples
 - **sitespeed.io Docs**: https://www.sitespeed.io/documentation/

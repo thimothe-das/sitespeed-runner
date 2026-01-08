@@ -15,6 +15,9 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from flask import Flask, jsonify, request
+from locales import RECOMMENDATION_TRANSLATIONS
+
+from locales import RECOMMENDATION_TRANSLATIONS
 
 
 def format_timestamp(dt: datetime) -> str:
@@ -237,6 +240,207 @@ def get_all_page_directories(scan_id: str) -> List[Path]:
     return sorted(page_dirs)
 
 
+# Lighthouse audit ID to category mapping
+LIGHTHOUSE_CATEGORY_MAP = {
+    # Performance
+    "first-contentful-paint": "performance",
+    "largest-contentful-paint": "performance",
+    "total-blocking-time": "performance",
+    "cumulative-layout-shift": "performance",
+    "speed-index": "performance",
+    "interactive": "performance",
+    "max-potential-fid": "performance",
+    "server-response-time": "performance",
+    "render-blocking-resources": "performance",
+    "unused-css-rules": "performance",
+    "unused-javascript": "performance",
+    "modern-image-formats": "performance",
+    "uses-responsive-images": "performance",
+    "efficient-animated-content": "performance",
+    "duplicated-javascript": "performance",
+    "legacy-javascript": "performance",
+    "dom-size": "performance",
+    "total-byte-weight": "performance",
+    "offscreen-images": "performance",
+    "unminified-css": "performance",
+    "unminified-javascript": "performance",
+    "uses-optimized-images": "performance",
+    "uses-text-compression": "performance",
+    "uses-rel-preconnect": "performance",
+    "redirects": "performance",
+    "uses-http2": "performance",
+    "unsized-images": "performance",
+    "mainthread-work-breakdown": "performance",
+    "font-display-insight": "performance",
+    "forced-reflow-insight": "performance",
+    "image-delivery-insight": "performance",
+    "lcp-breakdown-insight": "performance",
+    "lcp-discovery-insight": "performance",
+    "network-dependency-tree-insight": "performance",
+    "render-blocking-insight": "performance",
+    "cache-insight": "performance",
+    "legacy-javascript-insight": "performance",
+    
+    # Accessibility
+    "target-size": "accessibility",
+    "color-contrast": "accessibility",
+    "image-alt": "accessibility",
+    "button-name": "accessibility",
+    "link-name": "accessibility",
+    "aria-allowed-attr": "accessibility",
+    "aria-hidden-body": "accessibility",
+    "aria-hidden-focus": "accessibility",
+    "aria-input-field-name": "accessibility",
+    "aria-required-attr": "accessibility",
+    "aria-roles": "accessibility",
+    "aria-valid-attr": "accessibility",
+    "aria-valid-attr-value": "accessibility",
+    "document-title": "accessibility",
+    "html-has-lang": "accessibility",
+    "html-lang-valid": "accessibility",
+    "label": "accessibility",
+    "meta-viewport": "accessibility",
+    
+    # Best Practices
+    "is-on-https": "best-practices",
+    "external-anchors-use-rel-noopener": "best-practices",
+    "geolocation-on-start": "best-practices",
+    "notification-on-start": "best-practices",
+    "no-vulnerable-libraries": "best-practices",
+    "image-size-responsive": "best-practices",
+    "doctype": "best-practices",
+    "charset": "best-practices",
+    "inspector-issues": "best-practices",
+    "js-libraries": "best-practices",
+    "deprecations": "best-practices",
+    "password-inputs-can-be-pasted-into": "best-practices",
+    
+    # SEO
+    "viewport": "seo",
+    "meta-description": "seo",
+    "http-status-code": "seo",
+    "link-text": "seo",
+    "crawlable-anchors": "seo",
+    "is-crawlable": "seo",
+    "robots-txt": "seo",
+    "canonical": "seo",
+    "hreflang": "seo",
+    "font-size": "seo",
+    "plugins": "seo",
+    "tap-targets": "seo",
+}
+
+
+def parse_recommendations(scan_id: str) -> List[Dict]:
+    """
+    Parse Coach and Lighthouse recommendations for all pages in a scan.
+    Aggregates findings and returns a list of unique recommendations.
+    """
+    page_dirs = get_all_page_directories(scan_id)
+    recommendations_map = {}  # Key: (source, id), Value: Recommendation Dict
+    
+    for page_dir in page_dirs:
+        page_name = page_dir.name
+        
+        # 1. Parse Coach Recommendations
+        coach_file = page_dir / "data" / "coach.pageSummary.json"
+        if coach_file.exists():
+            try:
+                with open(coach_file, 'r') as f:
+                    coach_data = json.load(f)
+                
+                advice = coach_data.get("advice", {})
+                categories = ["performance", "accessibility", "bestpractice", "privacy"]
+                
+                for category in categories:
+                    cat_data = advice.get(category, {})
+                    advice_list = cat_data.get("adviceList", {})
+                    
+                    for rule_id, rule in advice_list.items():
+                        score = rule.get("score")
+                        if score is not None and score < 100:
+                            key = ("coach", rule_id)
+                            
+                            if key not in recommendations_map:
+                                # Try to get French translation, fallback to original
+                                translation = RECOMMENDATION_TRANSLATIONS.get(rule_id, {})
+                                title = translation.get("title", rule.get("title"))
+                                description = translation.get("description", rule.get("description"))
+                                
+                                recommendations_map[key] = {
+                                    "id": rule_id,
+                                    "source": "coach",
+                                    "category": category,
+                                    "title": title,
+                                    "description": description,
+                                    "score": score,
+                                    "severity": "error" if score < 50 else "warning" if score < 90 else "info",
+                                    "pages": []
+                                }
+                            
+                            rec = recommendations_map[key]
+                            if page_name not in rec["pages"]:
+                                rec["pages"].append(page_name)
+                            
+                            # Keep the lowest score found across pages
+                            if score < rec["score"]:
+                                rec["score"] = score
+                                rec["severity"] = "error" if score < 50 else "warning" if score < 90 else "info"
+                                
+            except Exception as e:
+                app.logger.warning(f"Error parsing coach recommendations for {page_name}: {e}")
+
+        # 2. Parse Lighthouse Recommendations
+        lighthouse_file = page_dir / "data" / "lighthouse.pageSummary.json"
+        if lighthouse_file.exists():
+            try:
+                with open(lighthouse_file, 'r') as f:
+                    lh_data = json.load(f)
+                
+                audits = lh_data.get("audits", {})
+                
+                for audit_id, audit in audits.items():
+                    score = audit.get("score")
+                    # Lighthouse scores are 0-1, we convert to 0-100.
+                    # Ignore null scores (not applicable) and perfect scores (1)
+                    if score is not None and score < 0.9:
+                        score_100 = int(score * 100)
+                        key = ("lighthouse", audit_id)
+                        
+                        if key not in recommendations_map:
+                            # Try to get French translation, fallback to original
+                            translation = RECOMMENDATION_TRANSLATIONS.get(audit_id, {})
+                            title = translation.get("title", audit.get("title"))
+                            description = translation.get("description", audit.get("description"))
+                            
+                            # Get category from mapping, default to 'other'
+                            category = LIGHTHOUSE_CATEGORY_MAP.get(audit_id, "other")
+                            
+                            recommendations_map[key] = {
+                                "id": audit_id,
+                                "source": "lighthouse",
+                                "category": category,
+                                "title": title,
+                                "description": description,
+                                "score": score_100,
+                                "severity": "error" if score_100 < 50 else "warning" if score_100 < 90 else "info",
+                                "pages": []
+                            }
+                        
+                        rec = recommendations_map[key]
+                        if page_name not in rec["pages"]:
+                            rec["pages"].append(page_name)
+                        
+                        if score_100 < rec["score"]:
+                            rec["score"] = score_100
+                            rec["severity"] = "error" if score_100 < 50 else "warning" if score_100 < 90 else "info"
+
+            except Exception as e:
+                app.logger.warning(f"Error parsing lighthouse recommendations for {page_name}: {e}")
+                
+    return list(recommendations_map.values())
+
+
 def parse_sitespeed_report(scan_id: str) -> Optional[Dict]:
     """Parse the sitespeed.io report and return a summary."""
     report_dir = REPORTS_DIR / scan_id
@@ -389,14 +593,19 @@ def run_sitespeed_scan(scan_id: str, url: str, extra_args: list):
         # Build docker command
         # Use HOST_REPORTS_DIR because docker socket runs containers on the host
         docker_cmd = [
-            "docker", "run", "--rm", "--shm-size=1g",
+            "docker", "run", "--rm", "--shm-size=2g",
             "-v", f"{HOST_REPORTS_DIR}:/sitespeed.io",
             SITESPEED_IMAGE,
             url,
             "--outputFolder", scan_id,
             "--plugins.add", "analysisstorer",  # Enable JSON output
             "--plugins.add", "@sitespeed.io/plugin-lighthouse",  # Enable Lighthouse
-            "--plugins.remove", "@sitespeed.io/plugin-gpsi"  # Disable GPSI to avoid quota
+            "--plugins.remove", "@sitespeed.io/plugin-gpsi",  # Disable GPSI to avoid quota
+            "--locale", "fr",
+            "--lighthouse.settings.locale", "fr",
+            # Lighthouse throttling settings (can be overridden by extra_args)
+            "--lighthouse.settings.throttlingMethod", "simulate",
+            "--lighthouse.settings.throttling.cpuSlowdownMultiplier", "1",  # No CPU throttling
         ]
         
         # Add extra arguments if provided
@@ -688,6 +897,49 @@ def get_aggregate_metrics(scan_id: str):
     return jsonify(response)
 
 
+@app.route('/report/<scan_id>/recommendations', methods=['GET'])
+def get_recommendations(scan_id: str):
+    """
+    Get aggregated recommendations/advice for a website.
+    Merges findings from Coach and Lighthouse across all pages.
+    """
+    report_dir = REPORTS_DIR / scan_id
+    if not report_dir.exists():
+        return jsonify({"error": "Scan not found"}), 404
+    
+    # If scan is in memory, check its status
+    if scan_id in scans:
+        scan = scans[scan_id]
+        if scan["status"] != "completed":
+            return jsonify({
+                "error": f"Report not available. Scan status: {scan['status']}"
+            }), 400
+    
+    try:
+        recommendations = parse_recommendations(scan_id)
+        
+        # Sort by score (ascending) to show worst issues first
+        recommendations.sort(key=lambda x: x["score"])
+        
+        scan_data = scans.get(scan_id, {})
+        response = {
+            "scanId": scan_id,
+            "url": scan_data.get("url", ""),
+            "timestamp": scan_data.get("started_at", ""),
+            "recommendationsCount": len(recommendations),
+            "recommendations": recommendations
+        }
+        
+        return jsonify(response)
+        
+    except Exception as e:
+        app.logger.error(f"Error retrieving recommendations for {scan_id}: {e}")
+        return jsonify({
+            "error": "Could not retrieve recommendations",
+            "details": str(e)
+        }), 500
+
+
 @app.route('/scans', methods=['GET'])
 def list_scans():
     """List all scans."""
@@ -709,4 +961,3 @@ if __name__ == '__main__':
     
     # Run Flask app
     app.run(host='0.0.0.0', port=5679, debug=False)
-
