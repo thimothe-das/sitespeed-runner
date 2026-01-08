@@ -605,7 +605,6 @@ def run_sitespeed_scan(scan_id: str, url: str, extra_args: list):
             "--lighthouse.settings.locale", "fr",
             # Lighthouse throttling settings (can be overridden by extra_args)
             "--lighthouse.settings.throttlingMethod", "simulate",
-            "--lighthouse.settings.throttling.cpuSlowdownMultiplier", "1",  # No CPU throttling
         ]
         
         # Add extra arguments if provided
