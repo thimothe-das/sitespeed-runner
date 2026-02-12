@@ -17,8 +17,6 @@ from typing import Dict, List, Optional
 from flask import Flask, jsonify, request
 from locales import RECOMMENDATION_TRANSLATIONS
 
-from locales import RECOMMENDATION_TRANSLATIONS
-
 
 def format_timestamp(dt: datetime) -> str:
     """Format datetime to ISO 8601 with milliseconds and Z suffix."""
@@ -30,6 +28,74 @@ app = Flask(__name__)
 REPORTS_DIR = Path("/reports")
 HOST_REPORTS_DIR = os.getenv("HOST_REPORTS_DIR", "/srv/docker/n8n/local_files/sitespeed-reports")
 SITESPEED_IMAGE = os.getenv("SITESPEED_IO_CONTAINER", "sitespeedio/sitespeed.io:38.6.0-plus1")
+
+# Browser-side JS that removes full-screen overlays (age gates, cookie banners, etc.)
+OVERLAY_REMOVAL_JS = r"""
+(function() {
+  var vw = window.innerWidth, vh = window.innerHeight, removed = 0;
+
+  // Remove fixed/absolute elements with high z-index covering >80% of viewport
+  var allEls = document.querySelectorAll('div, section, dialog, aside, [role="dialog"], [role="alertdialog"]');
+  for (var i = 0; i < allEls.length; i++) {
+    var el = allEls[i], style = window.getComputedStyle(el);
+    if (style.display === 'none' || style.visibility === 'hidden') continue;
+    if (style.position !== 'fixed' && style.position !== 'absolute') continue;
+    var z = parseInt(style.zIndex) || 0;
+    if (z < 10) continue;
+    var rect = el.getBoundingClientRect();
+    if (rect.width >= vw * 0.8 && rect.height >= vh * 0.8) { el.remove(); removed++; }
+  }
+
+  // Remove backdrop / overlay elements
+  var backdrops = document.querySelectorAll(
+    '.modal-backdrop, .overlay-backdrop, .popup-overlay, .popup-voile, ' +
+    '[class*="backdrop"], [class*="overlay"]:not(nav):not(header)'
+  );
+  for (var b = 0; b < backdrops.length; b++) {
+    var bs = window.getComputedStyle(backdrops[b]);
+    if ((bs.position === 'fixed' || bs.position === 'absolute') && (parseInt(bs.zIndex) || 0) >= 10) {
+      backdrops[b].remove(); removed++;
+    }
+  }
+
+  // Restore scrolling
+  document.documentElement.style.overflow = '';
+  document.body.style.overflow = '';
+  document.documentElement.style.position = '';
+  document.body.style.position = '';
+  document.body.classList.remove('modal-open', 'no-scroll', 'noscroll', 'overflow-hidden', 'popup-open');
+
+  return removed;
+})();
+""".strip()
+
+
+def generate_age_gate_script(url: str) -> str:
+    """Generate a sitespeed.io script that navigates to URL, removes overlays, then measures."""
+    # json.dumps produces a safely escaped JS string literal (with quotes)
+    safe_url = json.dumps(url)
+    js_code = OVERLAY_REMOVAL_JS.replace('`', '\\`').replace('${', '\\${')
+    return f"""'use strict';
+
+module.exports = async function(context, commands) {{
+  var url = {safe_url};
+
+  // 1. Navigate to the URL (triggers any age gate / overlay)
+  await commands.navigate(url);
+
+  // 2. Wait for overlays to fully render
+  await commands.wait.byTime(3000);
+
+  // 3. Remove all full-screen overlays from the DOM
+  await commands.js.run(`{js_code}`);
+
+  // 4. Brief wait for DOM to settle
+  await commands.wait.byTime(1000);
+
+  // 5. Measure the now-clean page (no reload, measures current state)
+  return commands.measure.start(url);
+}};
+"""
 
 # In-memory store for scan status
 scans: Dict[str, Dict] = {}
@@ -583,20 +649,32 @@ def parse_sitespeed_report(scan_id: str) -> Optional[Dict]:
     return summary if summary["reports"] or summary["metrics"] else None
 
 
-def run_sitespeed_scan(scan_id: str, url: str, extra_args: list):
+def run_sitespeed_scan(scan_id: str, url: str, extra_args: list, remove_age_gate: bool = False):
     """Run sitespeed.io scan in a separate thread."""
     try:
         scans[scan_id]["status"] = "running"
-        
+
         output_dir = f"/reports/{scan_id}"
-        
+
+        # When age gate removal is requested, use sitespeed.io scripting mode:
+        # generate a script that navigates, removes overlays, then measures.
+        if remove_age_gate:
+            scripts_dir = REPORTS_DIR / "_scripts"
+            scripts_dir.mkdir(parents=True, exist_ok=True)
+            script_file = scripts_dir / f"scan_{scan_id}.cjs"
+            script_file.write_text(generate_age_gate_script(url))
+            # In scripting mode, the script path replaces the URL argument
+            sitespeed_target = f"/sitespeed.io/_scripts/scan_{scan_id}.cjs"
+        else:
+            sitespeed_target = url
+
         # Build docker command
         # Use HOST_REPORTS_DIR because docker socket runs containers on the host
         docker_cmd = [
             "docker", "run", "--rm", "--shm-size=2g",
             "-v", f"{HOST_REPORTS_DIR}:/sitespeed.io",
             SITESPEED_IMAGE,
-            url,
+            sitespeed_target,
             "--outputFolder", scan_id,
             "--plugins.add", "analysisstorer",  # Enable JSON output
             "--plugins.add", "@sitespeed.io/plugin-lighthouse",  # Enable Lighthouse
@@ -606,7 +684,11 @@ def run_sitespeed_scan(scan_id: str, url: str, extra_args: list):
             # Lighthouse throttling settings (can be overridden by extra_args)
             "--lighthouse.settings.throttlingMethod", "simulate",
         ]
-        
+
+        # In scripting mode, tell sitespeed this is a multi-step script
+        if remove_age_gate:
+            docker_cmd.append("--multi")
+
         # Add extra arguments if provided
         if extra_args:
             docker_cmd.extend(extra_args)
@@ -639,6 +721,13 @@ def run_sitespeed_scan(scan_id: str, url: str, extra_args: list):
         scans[scan_id]["status"] = "failed"
         scans[scan_id]["error"] = str(e)
         app.logger.error(f"Scan {scan_id} error: {e}")
+    finally:
+        # Clean up per-scan script file if one was generated
+        if remove_age_gate:
+            try:
+                (REPORTS_DIR / "_scripts" / f"scan_{scan_id}.cjs").unlink(missing_ok=True)
+            except Exception:
+                pass
 
 
 @app.route('/health', methods=['GET'])
@@ -655,17 +744,19 @@ def run_sitespeed():
     Request body:
     {
         "url": "https://example.com",
-        "options": ["-b", "firefox", "--mobile", "--video"]  // optional
+        "options": ["-b", "firefox", "--mobile", "--video"],  // optional
+        "removeAgeGate": true  // optional, pre-visits URL to dismiss age gates
     }
     """
     data = request.get_json()
-    
+
     if not data or 'url' not in data:
         return jsonify({"error": "Missing 'url' in request body"}), 400
-    
+
     url = data['url']
     extra_args = data.get('options', [])
-    
+    remove_age_gate = data.get('removeAgeGate', False)
+
     # Validate URL
     if not url.startswith(('http://', 'https://')):
         return jsonify({"error": "URL must start with http:// or https://"}), 400
@@ -687,7 +778,7 @@ def run_sitespeed():
     # Start scan in background thread
     thread = threading.Thread(
         target=run_sitespeed_scan,
-        args=(scan_id, url, extra_args),
+        args=(scan_id, url, extra_args, remove_age_gate),
         daemon=True
     )
     thread.start()
@@ -957,6 +1048,6 @@ def list_scans():
 if __name__ == '__main__':
     # Ensure reports directory exists
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-    
+
     # Run Flask app
     app.run(host='0.0.0.0', port=5679, debug=False)
