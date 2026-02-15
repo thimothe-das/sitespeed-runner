@@ -27,6 +27,7 @@ app = Flask(__name__)
 # Configuration
 REPORTS_DIR = Path("/reports")
 HOST_REPORTS_DIR = os.getenv("HOST_REPORTS_DIR", "/srv/docker/n8n/local_files/sitespeed-reports")
+HOST_SCRIPTS_DIR = os.getenv("HOST_SCRIPTS_DIR", "/srv/docker/n8n/sitespeed-runner/scripts")
 SITESPEED_IMAGE = os.getenv("SITESPEED_IO_CONTAINER", "sitespeedio/sitespeed.io:38.6.0-plus1")
 
 # Browser-side JS that removes full-screen overlays (age gates, cookie banners, etc.)
@@ -673,6 +674,7 @@ def run_sitespeed_scan(scan_id: str, url: str, extra_args: list, remove_age_gate
         docker_cmd = [
             "docker", "run", "--rm", "--shm-size=2g",
             "-v", f"{HOST_REPORTS_DIR}:/sitespeed.io",
+            "-v", f"{HOST_SCRIPTS_DIR}:/scripts:ro",
             SITESPEED_IMAGE,
             sitespeed_target,
             "--outputFolder", scan_id,
