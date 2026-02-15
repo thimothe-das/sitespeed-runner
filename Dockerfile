@@ -26,9 +26,14 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY app.py .
 COPY locales.py* .
+COPY scripts/ /app/scripts-bundled/
 
 # Create reports directory
 RUN mkdir -p /reports
+
+# Entrypoint: copy bundled scripts to the mounted host path, then start the app
+COPY entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
 
 # Expose port
 EXPOSE 5679
@@ -38,5 +43,5 @@ ENV PYTHONUNBUFFERED=1
 ENV FLASK_APP=app.py
 
 # Run the application
-CMD ["gunicorn", "--bind", "0.0.0.0:5679", "--workers", "1", "--threads", "4", "--timeout", "600", "app:app"]
+ENTRYPOINT ["/app/entrypoint.sh"]
 

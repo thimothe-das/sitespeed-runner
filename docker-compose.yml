@@ -5,7 +5,8 @@ services:
       - "5679:5679"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - sitespeed-reports:/reports
+      - /srv/sitespeed-reports:/reports
+      - /srv/sitespeed-runner/scripts:/app/scripts
     environment:
       - HOST_REPORTS_DIR=/srv/sitespeed-reports
       - HOST_SCRIPTS_DIR=/srv/sitespeed-runner/scripts
