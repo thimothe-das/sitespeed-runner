@@ -1,0 +1,22 @@
+services:
+  sitespeed-runner:
+    build: .
+    ports:
+      - "5679:5679"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - sitespeed-reports:/reports
+    environment:
+      - HOST_REPORTS_DIR=/srv/sitespeed-reports
+      - HOST_SCRIPTS_DIR=/srv/sitespeed-runner/scripts
+      - SITESPEED_IO_CONTAINER=sitespeedio/sitespeed.io:38.6.0-plus1
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5679/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  sitespeed-reports:

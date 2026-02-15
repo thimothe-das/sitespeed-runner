@@ -158,7 +158,14 @@ def parse_page_metrics(page_dir: Path) -> Optional[Dict]:
             "accessibility": None,
             "fullyLoaded": None,
             "firstContentfulPaint": None,
-            "largestContentfulPaint": None
+            "largestContentfulPaint": None,
+            "cumulativeLayoutShift": None,
+            "totalBlockingTime": None,
+            "speedIndex": None
+        },
+        "pagexray": {
+            "transferSize": None,
+            "requests": None
         }
     }
     
@@ -236,10 +243,28 @@ def parse_page_metrics(page_dir: Path) -> Optional[Dict]:
             
             # Fully loaded approximation (interactive time or max-potential-fid as proxy)
             metrics["lighthouse"]["fullyLoaded"] = safe_get(audits, "interactive", "numericValue")
-            
+
+            # Core Web Vitals
+            metrics["lighthouse"]["cumulativeLayoutShift"] = safe_get(audits, "cumulative-layout-shift", "numericValue")
+            metrics["lighthouse"]["totalBlockingTime"] = safe_get(audits, "total-blocking-time", "numericValue")
+            metrics["lighthouse"]["speedIndex"] = safe_get(audits, "speed-index", "numericValue")
+
         except Exception as e:
             app.logger.warning(f"Could not parse lighthouse for {page_dir}: {e}")
-    
+
+    # Parse pagexray data
+    pagexray_file = page_dir / "data" / "pagexray.pageSummary.json"
+    if pagexray_file.exists():
+        try:
+            with open(pagexray_file, 'r') as f:
+                px_data = json.load(f)
+
+            metrics["pagexray"]["transferSize"] = px_data.get("transferSize")
+            metrics["pagexray"]["requests"] = px_data.get("requests")
+
+        except Exception as e:
+            app.logger.warning(f"Could not parse pagexray for {page_dir}: {e}")
+
     return metrics
 
 
@@ -276,10 +301,17 @@ def aggregate_pages_metrics(pages_metrics: List[Dict]) -> Dict:
             "accessibility": avg([p["lighthouse"]["accessibility"] for p in pages_metrics]),
             "fullyLoaded": avg([p["lighthouse"]["fullyLoaded"] for p in pages_metrics]),
             "firstContentfulPaint": avg([p["lighthouse"]["firstContentfulPaint"] for p in pages_metrics]),
-            "largestContentfulPaint": avg([p["lighthouse"]["largestContentfulPaint"] for p in pages_metrics])
+            "largestContentfulPaint": avg([p["lighthouse"]["largestContentfulPaint"] for p in pages_metrics]),
+            "cumulativeLayoutShift": avg([p["lighthouse"]["cumulativeLayoutShift"] for p in pages_metrics]),
+            "totalBlockingTime": avg([p["lighthouse"]["totalBlockingTime"] for p in pages_metrics]),
+            "speedIndex": avg([p["lighthouse"]["speedIndex"] for p in pages_metrics])
+        },
+        "pagexray": {
+            "transferSize": avg([p["pagexray"]["transferSize"] for p in pages_metrics]),
+            "requests": avg([p["pagexray"]["requests"] for p in pages_metrics])
         }
     }
-    
+
     return aggregated
 
 
