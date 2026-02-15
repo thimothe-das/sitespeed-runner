@@ -15,7 +15,6 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from flask import Flask, jsonify, request
-from locales import RECOMMENDATION_TRANSLATIONS
 
 
 def format_timestamp(dt: datetime) -> str:
@@ -429,10 +428,8 @@ def parse_recommendations(scan_id: str) -> List[Dict]:
                             key = ("coach", rule_id)
                             
                             if key not in recommendations_map:
-                                # Try to get French translation, fallback to original
-                                translation = RECOMMENDATION_TRANSLATIONS.get(rule_id, {})
-                                title = translation.get("title", rule.get("title"))
-                                description = translation.get("description", rule.get("description"))
+                                title = rule.get("title")
+                                description = rule.get("description")
                                 
                                 recommendations_map[key] = {
                                     "id": rule_id,
@@ -475,10 +472,8 @@ def parse_recommendations(scan_id: str) -> List[Dict]:
                         key = ("lighthouse", audit_id)
                         
                         if key not in recommendations_map:
-                            # Try to get French translation, fallback to original
-                            translation = RECOMMENDATION_TRANSLATIONS.get(audit_id, {})
-                            title = translation.get("title", audit.get("title"))
-                            description = translation.get("description", audit.get("description"))
+                            title = audit.get("title")
+                            description = audit.get("description")
                             
                             # Get category from mapping, default to 'other'
                             category = LIGHTHOUSE_CATEGORY_MAP.get(audit_id, "other")
