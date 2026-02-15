@@ -25,7 +25,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
 COPY app.py .
-COPY locales.py .
+COPY locales.py* .
 
 # Create reports directory
 RUN mkdir -p /reports
