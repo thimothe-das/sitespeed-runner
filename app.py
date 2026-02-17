@@ -100,6 +100,10 @@ module.exports = async function(context, commands) {{
 # In-memory store for scan status
 scans: Dict[str, Dict] = {}
 
+# Limit concurrent sitespeed containers to avoid exhausting server resources
+MAX_CONCURRENT_SCANS = int(os.getenv("MAX_CONCURRENT_SCANS", "2"))
+_scan_semaphore = threading.Semaphore(MAX_CONCURRENT_SCANS)
+
 
 def safe_get(data: Dict, *keys, default=None):
     """Safely navigate nested dictionaries."""
@@ -677,10 +681,31 @@ def parse_sitespeed_report(scan_id: str) -> Optional[Dict]:
     return summary if summary["reports"] or summary["metrics"] else None
 
 
+def _kill_container(container_name: str):
+    """Force-stop and remove a Docker container by name."""
+    try:
+        subprocess.run(
+            ["docker", "rm", "-f", container_name],
+            capture_output=True, timeout=30
+        )
+    except Exception:
+        pass
+
+
 def run_sitespeed_scan(scan_id: str, url: str, extra_args: list, remove_age_gate: bool = False):
     """Run sitespeed.io scan in a separate thread."""
+    container_name = f"sitespeed-{scan_id}"
+    acquired = False
     try:
+        scans[scan_id]["status"] = "queued"
+        app.logger.info(f"Scan {scan_id} waiting for available slot (max {MAX_CONCURRENT_SCANS} concurrent)")
+
+        # Wait for a slot (blocks until a semaphore permit is available)
+        _scan_semaphore.acquire()
+        acquired = True
+
         scans[scan_id]["status"] = "running"
+        app.logger.info(f"Scan {scan_id} acquired slot, starting container")
 
         output_dir = f"/reports/{scan_id}"
 
@@ -699,7 +724,7 @@ def run_sitespeed_scan(scan_id: str, url: str, extra_args: list, remove_age_gate
         # Build docker command
         # Use HOST_REPORTS_DIR because docker socket runs containers on the host
         docker_cmd = [
-            "docker", "run", "--rm", "--shm-size=2g",
+            "docker", "run", "--rm", "--name", container_name, "--shm-size=2g",
             "-v", f"{HOST_REPORTS_DIR}:/sitespeed.io",
             "-v", f"{HOST_SCRIPTS_DIR}:/scripts:ro",
             SITESPEED_IMAGE,
@@ -721,36 +746,47 @@ def run_sitespeed_scan(scan_id: str, url: str, extra_args: list, remove_age_gate
         # Add extra arguments if provided
         if extra_args:
             docker_cmd.extend(extra_args)
-        
+
         app.logger.info(f"Running command: {' '.join(docker_cmd)}")
-        
-        # Run the command
-        result = subprocess.run(
+
+        # Use Popen so we can kill the container on timeout (not just the CLI process)
+        proc = subprocess.Popen(
             docker_cmd,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=600  # 10 minute timeout
         )
-        
-        if result.returncode == 0:
+
+        try:
+            stdout, stderr = proc.communicate(timeout=600)  # 10 minute timeout
+        except subprocess.TimeoutExpired:
+            app.logger.error(f"Scan {scan_id} timed out, killing container {container_name}")
+            proc.kill()
+            proc.wait()
+            _kill_container(container_name)
+            scans[scan_id]["status"] = "failed"
+            scans[scan_id]["error"] = "Scan timeout (10 minutes exceeded)"
+            return
+
+        if proc.returncode == 0:
             scans[scan_id]["status"] = "completed"
             scans[scan_id]["completed_at"] = format_timestamp(datetime.utcnow())
-            scans[scan_id]["output"] = result.stdout
+            scans[scan_id]["output"] = stdout
             app.logger.info(f"Scan {scan_id} completed successfully")
         else:
             scans[scan_id]["status"] = "failed"
-            scans[scan_id]["error"] = result.stderr
-            app.logger.error(f"Scan {scan_id} failed: {result.stderr}")
-            
-    except subprocess.TimeoutExpired:
-        scans[scan_id]["status"] = "failed"
-        scans[scan_id]["error"] = "Scan timeout (10 minutes exceeded)"
-        app.logger.error(f"Scan {scan_id} timed out")
+            scans[scan_id]["error"] = stderr
+            app.logger.error(f"Scan {scan_id} failed: {stderr}")
+
     except Exception as e:
         scans[scan_id]["status"] = "failed"
         scans[scan_id]["error"] = str(e)
         app.logger.error(f"Scan {scan_id} error: {e}")
+        # Safety: kill the container if something unexpected happened
+        _kill_container(container_name)
     finally:
+        if acquired:
+            _scan_semaphore.release()
         # Clean up per-scan script file if one was generated
         if remove_age_gate:
             try:
