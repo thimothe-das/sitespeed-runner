@@ -6,11 +6,12 @@ Provides HTTP API to run sitespeed.io scans via Docker
 
 import json
 import os
+import shutil
 import subprocess
 import threading
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -28,6 +29,8 @@ REPORTS_DIR = Path("/reports")
 HOST_REPORTS_DIR = os.getenv("HOST_REPORTS_DIR", "/srv/docker/n8n/local_files/sitespeed-reports")
 HOST_SCRIPTS_DIR = os.getenv("HOST_SCRIPTS_DIR", "/srv/docker/n8n/sitespeed-runner/scripts")
 SITESPEED_IMAGE = os.getenv("SITESPEED_IO_CONTAINER", "sitespeedio/sitespeed.io:38.6.0-plus1")
+REPORT_RETENTION_HOURS = int(os.getenv("REPORT_RETENTION_HOURS", "24"))
+CLEANUP_INTERVAL_MINUTES = int(os.getenv("CLEANUP_INTERVAL_MINUTES", "30"))
 
 # Browser-side JS that removes full-screen overlays (age gates, cookie banners, etc.)
 OVERLAY_REMOVAL_JS = r"""
@@ -681,6 +684,34 @@ def parse_sitespeed_report(scan_id: str) -> Optional[Dict]:
     return summary if summary["reports"] or summary["metrics"] else None
 
 
+def cleanup_old_reports():
+    """Delete report directories older than REPORT_RETENTION_HOURS."""
+    if REPORT_RETENTION_HOURS <= 0:
+        return
+    cutoff = datetime.utcnow() - timedelta(hours=REPORT_RETENTION_HOURS)
+    try:
+        for entry in REPORTS_DIR.iterdir():
+            # Skip non-directories and internal dirs (e.g. _scripts)
+            if not entry.is_dir() or entry.name.startswith("_"):
+                continue
+            # Use directory modification time as proxy for report age
+            mtime = datetime.utcfromtimestamp(entry.stat().st_mtime)
+            if mtime < cutoff:
+                shutil.rmtree(entry, ignore_errors=True)
+                # Also remove from in-memory store
+                scans.pop(entry.name, None)
+                app.logger.info(f"Cleaned up old report: {entry.name}")
+    except Exception as e:
+        app.logger.error(f"Error during report cleanup: {e}")
+
+
+def _cleanup_loop():
+    """Background loop that periodically cleans up old reports."""
+    while True:
+        time.sleep(CLEANUP_INTERVAL_MINUTES * 60)
+        cleanup_old_reports()
+
+
 def _kill_container(container_name: str):
     """Force-stop and remove a Docker container by name."""
     try:
@@ -1095,6 +1126,23 @@ def get_recommendations(scan_id: str):
         }), 500
 
 
+@app.route('/report/<scan_id>', methods=['DELETE'])
+def delete_report(scan_id: str):
+    """Delete a scan report and free disk space."""
+    report_dir = REPORTS_DIR / scan_id
+    if not report_dir.exists() and scan_id not in scans:
+        return jsonify({"error": "Scan not found"}), 404
+
+    # Remove report files from disk
+    if report_dir.exists():
+        shutil.rmtree(report_dir, ignore_errors=True)
+
+    # Remove from in-memory store
+    scans.pop(scan_id, None)
+
+    return jsonify({"status": "deleted", "scanId": scan_id})
+
+
 @app.route('/scans', methods=['GET'])
 def list_scans():
     """List all scans."""
@@ -1113,6 +1161,12 @@ def list_scans():
 if __name__ == '__main__':
     # Ensure reports directory exists
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Run initial cleanup on startup, then start background cleanup thread
+    cleanup_old_reports()
+    cleanup_thread = threading.Thread(target=_cleanup_loop, daemon=True)
+    cleanup_thread.start()
+    app.logger.info(f"Report cleanup enabled: retention={REPORT_RETENTION_HOURS}h, interval={CLEANUP_INTERVAL_MINUTES}m")
 
     # Run Flask app
     app.run(host='0.0.0.0', port=5679, debug=False)
