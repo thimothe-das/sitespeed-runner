@@ -1,8 +1,18 @@
 services:
   sitespeed-runner:
     build: .
-    ports:
-      - "5679:5679"
+    # `expose` et non `ports` depuis le 2026-08-25 : le port n'est plus publie
+    # sur l'hote, il reste joignable par le reseau Docker.
+    #
+    # Ce conteneur monte /var/run/docker.sock EN ECRITURE et tourne en root. Il
+    # expose `POST /run-sitespeed`, sans authentification, qui LANCE des
+    # conteneurs. Publie sur 0.0.0.0, cela faisait une API publique capable de
+    # demarrer des conteneurs sur un hote dont elle detient la socket, et ce sur
+    # la machine qui porte trois sites clients.
+    #
+    # Rien ne l'appelait : 1 seule ligne de journal en 30 jours.
+    expose:
+      - "5679"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - /srv/sitespeed-reports:/reports
